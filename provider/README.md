@@ -324,6 +324,8 @@ Unless stated otherwise by the municipality, this endpoint must return only thos
 
 > Note: As a result of this definition, consumers should query the [trips endpoint](#trips) to infer when vehicles enter or leave the municipality boundary.
 
+Only a single `status_change` may be present per (`device_id`, `event_time`) tuple. That is, no events for the same device may take place at the same time. To provide multiple pieces of metadata at the same timestamp, multiple `event_types` are allowed (see [Event Types](#event-types)).
+
 Endpoint: `/status_changes`  
 Method: `GET`  
 Schema: [`status_changes` schema][sc-schema]  
@@ -337,8 +339,8 @@ Schema: [`status_changes` schema][sc-schema]
 | `vehicle_id` | String | Required | The Vehicle Identification Number visible on the vehicle itself |
 | `vehicle_type` | Enum | Required | see [vehicle types](#vehicle-types) table |
 | `propulsion_type` | Enum[] | Required | Array of [propulsion types](#propulsion-types); allows multiple values |
-| `event_type` | Enum | Required | See [event types](#event-types) table |
-| `event_type_reason` | Enum | Required | Reason for status change, allowable values determined by [`event type`](#event-types) |
+| `vehicle_state` | Enum | Required | See [vehicle states](#vehicle-states) table |
+| `event_types` | Enum[] | Required | Metadata about the vehicle state; allowable values determined by [`event type`](#event-types) |
 | `event_time` | [timestamp][ts] | Required | Date/time that event occurred at. See [Event Times](#event-times) |
 | `publication_time` | [timestamp][ts] | Optional | Date/time that event became available through the status changes endpoint |
 | `event_location` | GeoJSON [Point Feature][geo] | Required | |
@@ -362,22 +364,73 @@ If the data does not exist or the hour has not completed, `/status_changes` shal
 
 Without an `event_time` query parameter, `/status_changes` shall return a `400 Bad Request` error.
 
-### Event Types
+### Vehicle States & Event Types
 
-| `event_type` | Description | `event_type_reason` | Description |
-| ---------- | ---------------------- | ------- | ------------------ |
-| `available` | A device becomes available for customer use | `service_start` | Device introduced into service at the beginning of the day (if program does not operate 24/7) |
-| | | `user_drop_off` | User ends reservation |
-| | | `rebalance_drop_off` | Device moved for rebalancing |
-| | | `maintenance_drop_off` | Device introduced into service after being removed for maintenance |
-| | | `agency_drop_off` | The administrative agency (ie, DOT) drops a device into the PROW using an admin code or similar | 
-| `reserved` | A customer reserves a device (even if trip has not started yet) | `user_pick_up` | Customer reserves device |
-| `unavailable` | A device is on the street but becomes unavailable for customer use | `maintenance` | A device is no longer available due to equipment issues |
-| | | `low_battery` | A device is no longer available due to insufficient battery |
-| `removed` | A device is removed from the street and unavailable for customer use | `service_end` | Device removed from street because service has ended for the day (if program does not operate 24/7) |
-| | | `rebalance_pick_up` | Device removed from street and will be placed at another location to rebalance service |
-| | | `maintenance_pick_up` | Device removed from street so it can be worked on |
-| | | `agency_pick_up` | The administrative agency (ie, DOT) removes a device using an admin code or similar |
+#### Vehicle States
+
+Vehicle statuses represent the state of a vehicle from a compliance perspective at a single point in time. These states are from the SAE micromobility definitions.
+
+| `vehicle_status` | Definition |
+| ---------------- | ---------- |
+| `available` | A vehicle that is parked in a specified geography and available for customer use. A vehicle may not be defined as “available” and also “in-use” at the same time. |
+| `in_use` | A vehicle that is either in a specified geography and actively on a trip or that is reserved for a trip and unavailable to other users. A vehicle may not be defined as “in-use” and also “available” at the same time. |
+| `non_operational` | A vehicle that is parked in a specified geography but is not available for use because of a mechanical issue such as an equipment issue, insufficient battery, or other reason that it is non-operational. A vehicle may not be defined as “non-operational” and also “operational” at the same time. |
+| `removed` | A vehicle that has been removed from a specified geography by the provider to be recharged, repaired, rebalanced, or for some other reason has been removed and is unavailable for customers. A vehicle may not be defined as “removed” and also “deployed” or “unknown” at the same time. |
+| `unknown` | A vehicle that has been flagged as unknown by the provider because it has lost a GPS signal, has been moved without a formal vehicle status update, or for some other reason has been flagged as unknown. |
+
+#### Event Types
+
+Event types represent changes to a vehicle state. Events do not necessarily result in a change to `vehicle_status`.
+
+| `event_type` | Allowable `vehicle_states` | Definition |
+| ------------ | -------------------------- | ---------- |
+| `commission_device` | `available`, `non_operational` | Newly commissioned vehicle is placed on the public right of way. |
+| `decommission_device` | `removed` | Provider permanently removes vehicle from their fleet. |
+| `on_hours` | `available`, `non_operational` | Vehicle has entered its operating hours. Vehicle may remain in the `non_operational` state if another issue prevents rental. Only used for systems that do not operate 24/7. |
+| `off_hours` | `non_operational`, `removed` | Vehicle has left its operating hours. Only used for systems that do not operate 24/7. |
+| `rebalance_drop_off` | `available`, `non_operational` | Provider places vehicle on the public right of way after moving it to another location.|
+| `maintenance_drop_off` | `available`, `non_operational` | Provider places vehicle on the public right of way after correcting a maintenance issue. |
+| `agency_drop_off` | `available`, `non_operational` | Administrative agency places vehicle on the public right of way. |
+| `rebalance_pick_up` | `removed` | Provider removes vehicle from the public right of way with the intent to move it to another location. |
+| `maintenance_pick_up` | `removed` | Provider removes vehicle from the public right of way to correct a maintenance issue. |
+| `agency_pick_up` | `removed` | Administrative agency removes vehicle from the public right of way. |
+| `compliance_pick_up` | `removed` | Provider removes vehicle from the public right of way to correct a compliance issue. |
+| `begin_reservation` | `in_use` | User exclusively reserves the vehicle, without yet starting a trip. |
+| `cancel_reservation` | `available`, `non_operational` | User cancels a reservation without starting a trip. |
+| `leave_municipal_area` | `available`, `in_use`, `non_operational` | Vehicle leaves the municipal boundary. |
+| `enter_municipal_area` | `available`, `in_use`, `non_operational` | Vehicle enters the municipal boundary. |
+| `start_trip` | `in_use` | User begins a trip. This event requires an `associated_trip` entry, and should result in a trip in the `trips` dataset. |
+| `end_trip` |`available`, `non_operational` | User ends a trip. Vehicle may remain in the `non_operational` state if another issue prevents rental. |
+| `low_battery` | `non_operational` | Vehicle is not available due to a low battery. |
+| `maintenance` | `non_operational` | Vehicle is not available due to a maintenance issue. |
+| `compliance` | `non_operational` | Vehicle is not available due to a compliance issue. |
+| `unspecified` | All states | Must be specified when the reason for an event is not known. Cannot be combined with any other `event_types`. |
+| `missing` | `unknown` | Vehicle is unaccounted for; lost, stolen, or otherwise unable to be located. |
+
+
+#### Mapping between v0.4 and v0.5
+
+MDS v0.5 introduced a large set of changes to the event schema to bring consistency between provider and agency. A brief summary of the changes follows:
+
+* The `event_type` field is renamed to `vehicle_state`. This is a clarification in naming. Certain event types have changed as well: `unavailable` is now `non_operational` and `reserved` becomes `in_use`.
+* The old `event_type_reason` field roughly corresponds to the new `event_types` field. The new `event_types` field is now an array, and can represent multiple changes as a single event. Many names were changed as well.
+
+Use the following table to map v0.4 events to v0.5 events.
+
+| v0.4 `event_type` | v0.4 `event_type_reason` | v0.5 `(vehicle_status, [event_types])` |
+| ----------------- | ------------------------ | -------------------------------------- |
+| `available` |`service_start` | `(available, [on_hours])` |
+| | `user_drop_off` | `(available, [end_trip])` |
+| | `rebalance_drop_off` | `(available, [rebalance_drop_off])` |
+| | `maintenance_drop_off` | `(available, [maintenance_drop_off])` |
+| | `agency_drop_off` | `(available, [agency_drop_off])` |
+| `reserved` | `user_pick_up` | v0.4 was ambiguous: this might be either `(in_use, [start_trip])` or `(in_use, [start_reservation])` |
+| `unavailable` | `maintenance` | `(non_operational, [maintenance])` |
+| | `low_battery` | `(non_operational, [low_battery])` |
+| `removed` | `service_end` | `(removed, [service_end])` |
+| | `rebalance_pick_up` | `(removed, [rebalance_pick_up])` |
+| | `maintenance_pick_up` | `(removed, [maintenance_pick_up])` |
+| | `agency_pick_up` | `(removed, [agency_pick_up])` |
 
 [Top][toc]
 
